@@ -6,7 +6,6 @@ interface ChannelListProps {
   server: Server;
   activeChannelId: string | null;
   currentUser: User;
-  channelUsers: Array<{ userId: string; username: string; avatar: string }>;
   onSelectChannel: (id: string) => void;
   isMuted: boolean;
   toggleMute: () => void;
@@ -14,20 +13,21 @@ interface ChannelListProps {
   toggleDeafen: () => void;
   onOpenSettings: () => void;
   onOpenServerSettings: () => void;
+  onInvite: () => void;
 }
 
 export const ChannelList: React.FC<ChannelListProps> = ({
   server,
   activeChannelId,
   currentUser,
-  channelUsers,
   onSelectChannel,
   isMuted,
   toggleMute,
   isDeafened,
   toggleDeafen,
   onOpenSettings,
-  onOpenServerSettings
+  onOpenServerSettings,
+  onInvite
 }) => {
   const [showServerDropdown, setShowServerDropdown] = useState(false);
   const textChannels = server.channels.filter((c) => c.type === 'text');
@@ -48,7 +48,15 @@ export const ChannelList: React.FC<ChannelListProps> = ({
       {showServerDropdown && (
           <div className="absolute top-14 left-2 w-56 bg-black rounded-lg shadow-xl z-30 overflow-hidden border border-discord-darker p-1.5 space-y-1">
              <div 
-                className="px-2 py-1.5 rounded hover:bg-discord-blurple text-discord-textMuted hover:text-white cursor-pointer flex items-center justify-between text-sm"
+                className="px-2 py-1.5 rounded hover:bg-discord-blurple text-discord-blurple hover:text-white cursor-pointer flex items-center justify-between text-sm group"
+                onClick={() => { setShowServerDropdown(false); onInvite(); }}
+             >
+                 Invite People
+                 <UserPlus size={14} className="text-discord-blurple group-hover:text-white" />
+             </div>
+             <div className="h-[1px] bg-discord-darker my-1"></div>
+             <div 
+                className="px-2 py-1.5 rounded hover:bg-discord-active text-discord-textMuted hover:text-white cursor-pointer flex items-center justify-between text-sm"
                 onClick={() => { setShowServerDropdown(false); onOpenServerSettings(); }}
              >
                  Server Settings
@@ -122,21 +130,14 @@ export const ChannelList: React.FC<ChannelListProps> = ({
                   {/* Simple User List in Voice */}
                   {isActive && (
                       <div className="ml-8 mt-1 mb-2 space-y-1">
-                          {channelUsers.map(user => {
-                            const isCurrentUser = user.userId === currentUser.id;
-                            return (
-                              <div key={user.userId} className="flex items-center space-x-2">
-                                  <img src={user.avatar} className="w-6 h-6 rounded-full border border-discord-dark" />
-                                  <span className="text-sm text-white font-medium truncate">{user.username}</span>
-                                  {isCurrentUser && (
-                                    <div className="flex space-x-1">
-                                      {isMuted && <MicOff size={12} className="text-discord-red" />}
-                                      {isDeafened && <VolumeX size={12} className="text-discord-red" />}
-                                    </div>
-                                  )}
+                          <div className="flex items-center space-x-2">
+                              <img src={currentUser.avatar} className="w-6 h-6 rounded-full border border-discord-dark" />
+                              <span className="text-sm text-white font-medium truncate">{currentUser.username}</span>
+                              <div className="flex space-x-1">
+                                {isMuted && <MicOff size={12} className="text-discord-red" />}
+                                {isDeafened && <VolumeX size={12} className="text-discord-red" />}
                               </div>
-                            );
-                          })}
+                          </div>
                       </div>
                   )}
                 </div>

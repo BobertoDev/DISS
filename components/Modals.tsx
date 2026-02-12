@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { X, Upload, ChevronRight, Volume2, Mic, Sliders } from 'lucide-react';
+import { X, Upload, ChevronRight, Volume2, Mic, Sliders, Check, Copy } from 'lucide-react';
+import { Server } from '../types';
 
 interface ModalProps {
     isOpen: boolean;
@@ -236,4 +237,51 @@ export const JoinServerModal: React.FC<ModalProps> = ({ isOpen, onClose, onSubmi
             </div>
         </div>
     )
+}
+
+export const InviteModal: React.FC<{ isOpen: boolean; onClose: () => void; server: Server | null }> = ({ isOpen, onClose, server }) => {
+    const [copied, setCopied] = useState(false);
+
+    if (!isOpen || !server) return null;
+
+    // Simulate an invite link based on server ID or Name
+    const inviteLink = `https://discordia.gg/invite/${server.id.substring(0,8)}`;
+
+    const handleCopy = () => {
+        navigator.clipboard.writeText(inviteLink);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 animate-fade-in">
+            <div className="bg-discord-dark w-[440px] rounded-lg overflow-hidden shadow-2xl relative">
+                <button onClick={onClose} className="absolute top-4 right-4 text-discord-textMuted hover:text-discord-text transition-colors">
+                    <X size={24} />
+                </button>
+                
+                <div className="p-6">
+                    <h2 className="text-lg font-bold text-white mb-2 uppercase">Invite friends to {server.name}</h2>
+                    <p className="text-discord-textMuted text-sm mb-6">Share this link with others to grant them access to this server!</p>
+                    
+                    <div className="bg-discord-darker p-2 rounded flex items-center border border-black/20">
+                         <input 
+                            readOnly
+                            value={inviteLink}
+                            className="bg-transparent flex-1 text-discord-text text-sm outline-none px-2"
+                         />
+                         <button 
+                            onClick={handleCopy}
+                            className={`px-4 py-1.5 rounded text-sm font-bold transition-all duration-200 min-w-[70px] ${copied ? 'bg-discord-green text-white' : 'bg-discord-blurple hover:bg-discord-blurpleHover text-white'}`}
+                        >
+                            {copied ? 'Copied' : 'Copy'}
+                        </button>
+                    </div>
+                    <div className="mt-2 text-xs text-discord-textMuted">
+                        Your invite link expires in 7 days.
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
 }

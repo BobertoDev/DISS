@@ -1,12 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Mic, MicOff, PhoneOff, Video, Headphones, VolumeX, MoreHorizontal, AlertCircle, Monitor, MonitorOff } from 'lucide-react';
 import { User, Channel } from '../types';
-import { WebRTCManager } from '../services/webrtc';
 
 interface VoiceStageProps {
     channel: Channel;
     currentUser: User;
-    channelUsers: Array<{ userId: string; username: string; avatar: string }>;
     onLeave: () => void;
     isMuted: boolean;
     toggleMute: () => void;
@@ -17,10 +15,9 @@ interface VoiceStageProps {
     outputVolume: number;
 }
 
-export const VoiceStage: React.FC<VoiceStageProps> = ({
-    channel,
-    currentUser,
-    channelUsers,
+export const VoiceStage: React.FC<VoiceStageProps> = ({ 
+    channel, 
+    currentUser, 
     onLeave,
     isMuted,
     toggleMute,
@@ -34,15 +31,12 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
     const [stream, setStream] = useState<MediaStream | null>(null);
     const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
-
+    
     const audioContextRef = useRef<AudioContext | null>(null);
     const analyserRef = useRef<AnalyserNode | null>(null);
     const inputGainRef = useRef<GainNode | null>(null);
     const requestRef = useRef<number | null>(null);
     const screenVideoRef = useRef<HTMLVideoElement>(null);
-    const webrtcManagerRef = useRef<WebRTCManager | null>(null);
-    const remoteAudioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
 
     // Initial Audio Setup
     useEffect(() => {
@@ -66,23 +60,6 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                 const audioStream = await navigator.mediaDevices.getUserMedia(constraints);
                 setStream(audioStream);
                 setError(null);
-
-                // Initialize WebRTC Manager
-                const webrtcManager = new WebRTCManager(
-                    channel.id,
-                    currentUser.id,
-                    (userId, remoteStream) => {
-                        console.log(`[VoiceStage] Received remote stream from ${userId}`);
-                        setRemoteStreams(prev => {
-                            const newMap = new Map(prev);
-                            newMap.set(userId, remoteStream);
-                            return newMap;
-                        });
-                    }
-                );
-
-                await webrtcManager.initialize(audioStream);
-                webrtcManagerRef.current = webrtcManager;
 
                 audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
                 analyserRef.current = audioContextRef.current.createAnalyser();
@@ -137,67 +114,8 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
             if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
                 audioContextRef.current.close().catch(e => console.error("Error closing audio context", e));
             }
-            if (webrtcManagerRef.current) {
-                webrtcManagerRef.current.destroy();
-                webrtcManagerRef.current = null;
-            }
         };
     }, []); // Run once on mount
-
-    // Connect to peers when users join
-    useEffect(() => {
-        if (!webrtcManagerRef.current) return;
-
-        const otherUsers = channelUsers.filter(u => u.userId !== currentUser.id);
-
-        otherUsers.forEach(user => {
-            if (!remoteStreams.has(user.userId)) {
-                console.log(`[VoiceStage] Connecting to peer: ${user.userId}`);
-                webrtcManagerRef.current?.connectToPeer(user.userId);
-            }
-        });
-
-        // Clean up disconnected peers
-        remoteStreams.forEach((_, userId) => {
-            if (!otherUsers.find(u => u.userId === userId)) {
-                console.log(`[VoiceStage] Removing peer: ${userId}`);
-                webrtcManagerRef.current?.removePeer(userId);
-                setRemoteStreams(prev => {
-                    const newMap = new Map(prev);
-                    newMap.delete(userId);
-                    return newMap;
-                });
-            }
-        });
-    }, [channelUsers, currentUser.id]);
-
-    // Play remote audio streams
-    useEffect(() => {
-        remoteStreams.forEach((remoteStream, userId) => {
-            let audioElement = remoteAudioRefs.current.get(userId);
-
-            if (!audioElement) {
-                audioElement = new Audio();
-                audioElement.autoplay = true;
-                remoteAudioRefs.current.set(userId, audioElement);
-            }
-
-            audioElement.srcObject = remoteStream;
-            audioElement.volume = isDeafened ? 0 : (outputVolume / 100);
-
-            console.log(`[VoiceStage] Playing audio from ${userId}, volume: ${audioElement.volume}`);
-        });
-
-        // Cleanup removed streams
-        remoteAudioRefs.current.forEach((audioElement, userId) => {
-            if (!remoteStreams.has(userId)) {
-                audioElement.pause();
-                audioElement.srcObject = null;
-                remoteAudioRefs.current.delete(userId);
-                console.log(`[VoiceStage] Stopped audio from ${userId}`);
-            }
-        });
-    }, [remoteStreams, outputVolume, isDeafened]);
 
     // Handle Input Volume Changes
     useEffect(() => {
@@ -326,6 +244,7 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                     `}>
                         <div className="w-24 h-24 rounded-full overflow-hidden mb-4 relative">
                             <img src={currentUser.avatar} alt="Me" className="w-full h-full object-cover" />
+                            {/* Status Overlay */}
                             {(isMuted || error || isDeafened) && (
                                 <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
                                     {isDeafened ? (
@@ -342,37 +261,17 @@ export const VoiceStage: React.FC<VoiceStageProps> = ({
                         {screenStream && <span className="text-discord-blurple text-[10px] font-bold mt-1 uppercase">Streaming</span>}
                     </div>
 
-                    {/* Other Users in Channel */}
-                    {channelUsers
-                        .filter(u => u.userId !== currentUser.id)
-                        .map(user => (
-                            <div key={user.userId} className="relative w-48 h-48 rounded-2xl bg-discord-dark border-2 border-transparent flex flex-col items-center justify-center">
-                                <div className="w-24 h-24 rounded-full overflow-hidden mb-4 relative">
-                                    <img src={user.avatar} alt={user.username} className="w-full h-full object-cover" />
-                                    {isDeafened && (
-                                        <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                                            <VolumeX className="text-red-500 w-10 h-10" />
-                                        </div>
-                                    )}
+                    {/* Dummy Friend 1 (For Demo) */}
+                    <div className="relative w-48 h-48 rounded-2xl bg-discord-dark border-2 border-transparent flex flex-col items-center justify-center opacity-50">
+                        <div className="w-24 h-24 rounded-full overflow-hidden mb-4 bg-gray-600 relative">
+                            {isDeafened && (
+                                <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                                    <div className="text-white text-xs font-bold px-2 text-center">You are deafened</div>
                                 </div>
-                                <span className="text-white font-bold text-lg">{user.username}</span>
-                            </div>
-                        ))
-                    }
-
-                    {/* Waiting message if no other users */}
-                    {channelUsers.filter(u => u.userId !== currentUser.id).length === 0 && (
-                        <div className="relative w-48 h-48 rounded-2xl bg-discord-dark border-2 border-transparent flex flex-col items-center justify-center opacity-50">
-                            <div className="w-24 h-24 rounded-full overflow-hidden mb-4 bg-gray-600 relative">
-                                {isDeafened && (
-                                    <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                                        <div className="text-white text-xs font-bold px-2 text-center">You are deafened</div>
-                                    </div>
-                                )}
-                            </div>
-                            <span className="text-discord-textMuted font-bold">Waiting for friends...</span>
+                            )}
                         </div>
-                    )}
+                        <span className="text-discord-textMuted font-bold">Waiting for friends...</span>
+                    </div>
                 </div>
 
             </div>
