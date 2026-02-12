@@ -1,14 +1,30 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
+import { RealtimeChannel } from '@supabase/supabase-js';
 import { ServerList } from './components/ServerList';
 import { ChannelList } from './components/ChannelList';
 import { ChatArea } from './components/ChatArea';
 import { VoiceStage } from './components/VoiceStage';
-import { CreateServerModal, JoinServerModal, SettingsModal, InviteModal } from './components/Modals';
+import { CreateServerModal, JoinServerModal, SettingsModal } from './components/Modals';
 import { ServerSettingsModal } from './components/ServerSettingsModal';
 import { LoginPage } from './components/LoginPage';
 import { Server, Channel, User, Message, ServerMember } from './types';
-import { initDB, saveServers, saveUser, getDefaultChannels, getDefaultRoles, PUBLIC_SERVER_ID, getSeedServers } from './services/db';
+import { getDefaultChannels, getDefaultRoles } from './services/db';
+import {
+  upsertUser,
+  createServer as createServerInDB,
+  getServersForUser,
+  sendMessage as sendMessageToDB,
+  subscribeToChannel,
+  unsubscribeFromChannel,
+  joinServer as joinServerInDB,
+  findServerByName,
+  subscribeToServerMembers,
+  joinChannelPresence,
+  leaveChannelPresence,
+  getChannelPresence,
+  subscribeToChannelPresence
+} from './services/supabase';
 
 function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -30,239 +46,283 @@ function App() {
   const [showJoinModal, setShowJoinModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showServerSettingsModal, setShowServerSettingsModal] = useState(false);
-  const [showInviteModal, setShowInviteModal] = useState(false);
 
-  // Broadcast Channel for Multi-Tab Syncing
-  const [broadcastChannel] = useState(new BroadcastChannel('discord_clone_channel'));
+  const realtimeChannelsRef = useRef<Map<string, RealtimeChannel>>(new Map());
+  const realtimeServerMembersRef = useRef<Map<string, RealtimeChannel>>(new Map());
+  const realtimeChannelPresenceRef = useRef<Map<string, RealtimeChannel>>(new Map());
 
-  // Helper to ensure user is in Public Server
-  const ensurePublicAccess = (currentUser: User, currentServers: Server[]) => {
-      const publicId = PUBLIC_SERVER_ID;
-      let updatedServers = [...currentServers];
-      let changed = false;
+  const [channelUsers, setChannelUsers] = useState<Array<{ userId: string; username: string; avatar: string }>>([]);
 
-      // 1. Check if public server exists, if not, add it from seed
-      let publicServerIndex = updatedServers.findIndex(s => s.id === publicId);
-      
-      if (publicServerIndex === -1) {
-          const seed = getSeedServers().find(s => s.id === publicId);
-          if (seed) {
-              updatedServers.push(seed);
-              publicServerIndex = updatedServers.length - 1;
-              changed = true;
-          }
+  const loadUserServers = async (userId: string) => {
+    try {
+      const userServers = await getServersForUser(userId);
+      setServers(userServers);
+
+      if (userServers.length > 0 && !activeServerId) {
+        setActiveServerId(userServers[0].id);
+        setActiveChannelId(userServers[0].channels[0].id);
       }
-
-      // 2. Add user to public server if not present
-      if (publicServerIndex !== -1) {
-          const publicServer = updatedServers[publicServerIndex];
-          if (!publicServer.members.find(m => m.userId === currentUser.id)) {
-              const newMember: ServerMember = {
-                  userId: currentUser.id,
-                  username: currentUser.username,
-                  avatar: currentUser.avatar || '',
-                  roles: ['r-everyone']
-              };
-              
-              const updatedServer = {
-                  ...publicServer,
-                  members: [...publicServer.members, newMember]
-              };
-              updatedServers[publicServerIndex] = updatedServer;
-              changed = true;
-          }
-      }
-
-      if (changed) {
-          setServers(updatedServers);
-          saveServers(updatedServers);
-          
-          // If no active server set, set to public
-          if (!activeServerId) {
-             const pub = updatedServers.find(s => s.id === publicId);
-             if (pub) {
-                 setActiveServerId(pub.id);
-                 setActiveChannelId(pub.channels[0].id);
-             }
-          }
-      } else {
-          // Servers didn't change, but we might just simply be setting state in init
-          setServers(updatedServers); 
-          if (!activeServerId && updatedServers.length > 0) {
-              const pub = updatedServers.find(s => s.id === publicId) || updatedServers[0];
-              setActiveServerId(pub.id);
-              setActiveChannelId(pub.channels[0].id);
-          }
-      }
+    } catch (error) {
+      console.error("Failed to load servers:", error);
+    }
   };
 
-  // Load Data from DB
   useEffect(() => {
-    const loadData = async () => {
-        try {
-            const { user: dbUser, servers: dbServers } = await initDB();
-            
-            // Only set user if found in DB, otherwise it stays null (triggering Login Page)
-            if (dbUser) {
-                setUser(dbUser);
-                ensurePublicAccess(dbUser, dbServers);
-            } else {
-                setServers(dbServers);
-            }
-        } catch (error) {
-            console.error("Failed to load database:", error);
-        } finally {
-            setIsLoading(false);
-        }
-    };
-    loadData();
+    const storedUser = localStorage.getItem('discordia_user');
+    if (storedUser) {
+      const parsedUser = JSON.parse(storedUser);
+      setUser(parsedUser);
+      loadUserServers(parsedUser.id);
+    }
+    setIsLoading(false);
   }, []);
 
   useEffect(() => {
-    // Listen for messages from other tabs
-    broadcastChannel.onmessage = (event) => {
-        const { type, payload } = event.data;
-        if (type === 'NEW_MESSAGE') {
-            receiveMessage(payload);
-        }
+    const handleGeminiResponse = (e: any) => {
+      const { channelId, content } = e.detail;
+      const botMsg: Message = {
+        id: uuidv4(),
+        channelId,
+        content,
+        senderId: 'gemini-bot',
+        senderName: 'Gemini',
+        senderAvatar: 'https://www.gstatic.com/lamda/images/gemini_sparkle_v002_d4735304ff6292a690345.svg',
+        timestamp: Date.now(),
+        isSystem: true
+      };
+      handleSendMessage(channelId, content, botMsg.id, true);
     };
 
-    // Listen for Gemini Bot events dispatched from ChatArea
-    const handleGeminiResponse = (e: any) => {
-        const { channelId, content } = e.detail;
-        const botMsg: Message = {
-            id: uuidv4(),
-            channelId,
-            content,
-            senderId: 'gemini-bot',
-            senderName: 'Gemini',
-            senderAvatar: 'https://www.gstatic.com/lamda/images/gemini_sparkle_v002_d4735304ff6292a690345.svg',
-            timestamp: Date.now(),
-            isSystem: true
-        };
-        addMessage(botMsg);
-    };
-    
     window.addEventListener('gemini-response', handleGeminiResponse);
     return () => window.removeEventListener('gemini-response', handleGeminiResponse);
-  }, [servers]); 
+  }, [user]);
 
-  const handleLogin = (newUser: User) => {
-      setUser(newUser);
-      saveUser(newUser);
-      ensurePublicAccess(newUser, servers);
-  };
+  useEffect(() => {
+    if (!activeChannelId) return;
 
-  const addMessage = (msg: Message, saveToDb: boolean = true) => {
+    console.log(`Subscribing to channel: ${activeChannelId}`);
+
+    const existingChannel = realtimeChannelsRef.current.get(activeChannelId);
+    if (existingChannel) {
+      console.log(`Already subscribed to channel: ${activeChannelId}`);
+      return;
+    }
+
+    const channel = subscribeToChannel(activeChannelId, (newMessage) => {
+      console.log('New message received:', newMessage);
       setServers(prevServers => {
-          const newServers = prevServers.map(server => {
-              const channelExists = server.channels.find(c => c.id === msg.channelId);
-              if (!channelExists) return server;
+        return prevServers.map(server => {
+          const channelExists = server.channels.find(c => c.id === newMessage.channelId);
+          if (!channelExists) return server;
 
-              return {
-                  ...server,
-                  channels: server.channels.map(ch => {
-                      if (ch.id === msg.channelId) {
-                          if (ch.messages?.find(m => m.id === msg.id)) return ch;
-                          return { ...ch, messages: [...(ch.messages || []), msg] };
-                      }
-                      return ch;
-                  })
-              };
-          });
-          
-          if (saveToDb) {
-              saveServers(newServers);
-          }
-          return newServers;
+          return {
+            ...server,
+            channels: server.channels.map(ch => {
+              if (ch.id === newMessage.channelId) {
+                if (ch.messages?.find(m => m.id === newMessage.id)) return ch;
+                return { ...ch, messages: [...(ch.messages || []), newMessage] };
+              }
+              return ch;
+            })
+          };
+        });
       });
-  };
+    });
 
-  const receiveMessage = (msg: Message) => {
-      addMessage(msg, false);
-  };
+    realtimeChannelsRef.current.set(activeChannelId, channel);
 
-  const handleSendMessage = (channelId: string, content: string) => {
-      if (!user) return;
-      
-      const newMessage: Message = {
-          id: uuidv4(),
-          channelId,
-          content,
-          senderId: user.id,
-          senderName: user.username,
-          senderAvatar: user.avatar,
-          timestamp: Date.now()
-      };
+    return () => {
+      console.log(`Unsubscribing from channel: ${activeChannelId}`);
+      if (channel) {
+        unsubscribeFromChannel(channel);
+        realtimeChannelsRef.current.delete(activeChannelId);
+      }
+    };
+  }, [activeChannelId]);
 
-      addMessage(newMessage, true);
+  useEffect(() => {
+    if (!activeServerId) return;
 
-      broadcastChannel.postMessage({
-          type: 'NEW_MESSAGE',
-          payload: newMessage
+    console.log(`Subscribing to server members: ${activeServerId}`);
+
+    const existingChannel = realtimeServerMembersRef.current.get(activeServerId);
+    if (existingChannel) {
+      console.log(`Already subscribed to server members: ${activeServerId}`);
+      return;
+    }
+
+    const channel = subscribeToServerMembers(activeServerId, (newMember) => {
+      console.log('New member joined:', newMember);
+      setServers(prevServers => {
+        return prevServers.map(server => {
+          if (server.id !== activeServerId) return server;
+
+          if (server.members.find(m => m.userId === newMember.userId)) return server;
+
+          return {
+            ...server,
+            members: [...server.members, newMember]
+          };
+        });
       });
+    });
+
+    realtimeServerMembersRef.current.set(activeServerId, channel);
+
+    return () => {
+      console.log(`Unsubscribing from server members: ${activeServerId}`);
+      if (channel) {
+        unsubscribeFromChannel(channel);
+        realtimeServerMembersRef.current.delete(activeServerId);
+      }
+    };
+  }, [activeServerId]);
+
+  useEffect(() => {
+    if (!activeChannelId || !user) return;
+
+    const setupPresence = async () => {
+      try {
+        console.log(`Joining channel presence: ${activeChannelId}`);
+        await joinChannelPresence(activeChannelId, user.id);
+
+        const existingUsers = await getChannelPresence(activeChannelId);
+        console.log('Existing users in channel:', existingUsers);
+        setChannelUsers(existingUsers);
+
+        const existingPresenceChannel = realtimeChannelPresenceRef.current.get(activeChannelId);
+        if (!existingPresenceChannel) {
+          const presenceChannel = subscribeToChannelPresence(
+            activeChannelId,
+            (userId, joined, userData) => {
+              console.log(`User ${userId} ${joined ? 'joined' : 'left'} channel`);
+              setChannelUsers(prev => {
+                if (joined && userData) {
+                  if (prev.find(u => u.userId === userId)) return prev;
+                  return [...prev, { userId, username: userData.username, avatar: userData.avatar }];
+                } else {
+                  return prev.filter(u => u.userId !== userId);
+                }
+              });
+            }
+          );
+          realtimeChannelPresenceRef.current.set(activeChannelId, presenceChannel);
+        }
+      } catch (error) {
+        console.error('Failed to setup channel presence:', error);
+      }
+    };
+
+    setupPresence();
+
+    return () => {
+      if (user && activeChannelId) {
+        console.log(`Leaving channel presence: ${activeChannelId}`);
+        leaveChannelPresence(activeChannelId, user.id).catch(console.error);
+
+        const presenceChannel = realtimeChannelPresenceRef.current.get(activeChannelId);
+        if (presenceChannel) {
+          unsubscribeFromChannel(presenceChannel);
+          realtimeChannelPresenceRef.current.delete(activeChannelId);
+        }
+      }
+    };
+  }, [activeChannelId, user]);
+
+  const handleLogin = async (newUser: User) => {
+    try {
+      await upsertUser(newUser);
+      setUser(newUser);
+      localStorage.setItem('discordia_user', JSON.stringify(newUser));
+      await loadUserServers(newUser.id);
+    } catch (error) {
+      console.error("Failed to login:", error);
+      alert("Login failed. Please try again.");
+    }
   };
 
-  const handleCreateServer = ({ name, password }: any) => {
-      if (!user) return;
+  const handleSendMessage = async (channelId: string, content: string, messageId?: string, isSystem?: boolean) => {
+    if (!user) return;
 
-      const newServer: Server = {
-          id: uuidv4(),
-          name,
-          password,
-          ownerId: user.id,
-          channels: getDefaultChannels().map(c => ({...c, id: uuidv4(), messages: []})),
-          roles: getDefaultRoles(),
-          members: [{
-              userId: user.id,
-              username: user.username,
-              avatar: user.avatar || '',
-              roles: ['r-admin'] // Creator gets admin
-          }]
-      };
+    const newMessage: Message = {
+      id: messageId || uuidv4(),
+      channelId,
+      content,
+      senderId: user.id,
+      senderName: user.username,
+      senderAvatar: user.avatar,
+      timestamp: Date.now(),
+      isSystem: isSystem || false
+    };
 
-      const updatedServers = [...servers, newServer];
-      setServers(updatedServers);
-      saveServers(updatedServers);
+    try {
+      await sendMessageToDB(newMessage);
+    } catch (error) {
+      console.error("Failed to send message:", error);
+    }
+  };
 
+  const handleCreateServer = async ({ name, password }: any) => {
+    if (!user) return;
+
+    const newServer: Server = {
+      id: uuidv4(),
+      name,
+      password,
+      ownerId: user.id,
+      channels: getDefaultChannels().map(c => ({...c, id: uuidv4(), messages: []})),
+      roles: getDefaultRoles(),
+      members: [{
+        userId: user.id,
+        username: user.username,
+        avatar: user.avatar || '',
+        roles: ['r-admin']
+      }]
+    };
+
+    try {
+      await createServerInDB(newServer, user.id);
+      await loadUserServers(user.id);
       setActiveServerId(newServer.id);
       setActiveChannelId(newServer.channels[0].id);
+    } catch (error) {
+      console.error("Failed to create server:", error);
+      alert("Failed to create server. Please try again.");
+    }
   };
 
   const handleUpdateServer = (updatedServer: Server) => {
-      const updatedServers = servers.map(s => s.id === updatedServer.id ? updatedServer : s);
-      setServers(updatedServers);
-      saveServers(updatedServers);
+    const updatedServers = servers.map(s => s.id === updatedServer.id ? updatedServer : s);
+    setServers(updatedServers);
   };
 
-  const handleJoinServer = ({ name, password }: any) => {
-      if (!user) return;
+  const handleJoinServer = async ({ name, password }: any) => {
+    if (!user) return;
 
-      const target = servers.find(s => s.name === name);
-      if (target) {
-          if (target.password && target.password !== password) {
-              alert("Incorrect password!");
-              return;
-          }
-          // Add user to members if not already there
-          if (!target.members.find(m => m.userId === user.id)) {
-             const updatedServer = {
-                 ...target,
-                 members: [...target.members, {
-                     userId: user.id,
-                     username: user.username,
-                     avatar: user.avatar || '',
-                     roles: ['r-everyone']
-                 }]
-             };
-             handleUpdateServer(updatedServer);
-          }
+    try {
+      const target = await findServerByName(name);
 
-          setActiveServerId(target.id);
-          setActiveChannelId(target.channels[0].id);
-      } else {
-          alert("Server not found.");
+      if (!target) {
+        alert("Server not found.");
+        return;
       }
+
+      if (target.password && target.password !== password) {
+        alert("Incorrect password!");
+        return;
+      }
+
+      if (!target.members.find(m => m.userId === user.id)) {
+        await joinServerInDB(target.id, user.id);
+        await loadUserServers(user.id);
+      }
+
+      setActiveServerId(target.id);
+      setActiveChannelId(target.channels[0].id);
+    } catch (error) {
+      console.error("Failed to join server:", error);
+      alert("Failed to join server. Please try again.");
+    }
   };
 
   // Audio Toggles
@@ -320,10 +380,11 @@ function App() {
       />
 
       {activeServer ? (
-          <ChannelList 
-             server={activeServer} 
+          <ChannelList
+             server={activeServer}
              activeChannelId={activeChannelId}
              currentUser={user}
+             channelUsers={channelUsers}
              onSelectChannel={(id) => {
                  const ch = activeServer.channels.find(c => c.id === id);
                  setActiveChannelId(id);
@@ -339,7 +400,6 @@ function App() {
              toggleDeafen={toggleDeafen}
              onOpenSettings={() => setShowSettingsModal(true)}
              onOpenServerSettings={() => setShowServerSettingsModal(true)}
-             onInvite={() => setShowInviteModal(true)}
           />
       ) : (
           <div className="w-60 bg-discord-light border-r border-discord-darker"></div>
@@ -356,9 +416,10 @@ function App() {
          )}
          
          {activeChannel && isVoiceConnected && activeChannel.type === 'voice' && (
-             <VoiceStage 
+             <VoiceStage
                 channel={activeChannel}
                 currentUser={user}
+                channelUsers={channelUsers}
                 onLeave={() => {
                    setIsVoiceConnected(false);
                    const txt = activeServer?.channels.find(c => c.type === 'text');
@@ -411,14 +472,6 @@ function App() {
             onClose={() => setShowServerSettingsModal(false)}
             onUpdateServer={handleUpdateServer}
           />
-      )}
-
-      {activeServer && (
-         <InviteModal 
-            isOpen={showInviteModal}
-            onClose={() => setShowInviteModal(false)}
-            server={activeServer}
-         />
       )}
 
     </div>
